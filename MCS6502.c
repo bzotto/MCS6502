@@ -1,13 +1,17 @@
 //
 //  MCS6502.c
 //
-//  Created by Ben Zotto on 3/19/19.
-//  Copyright © 2019 Ben Zotto. All rights reserved.
+//  Copyright (c) 2019 by Ben Zotto
+//
+//  Usage is subject to the MIT License, and copyright credit must be noted
+//  in the documenation of binary redistributions. See accompanying LICENSE.TXT.
 //
 
 #include <string.h>
 #include "MCS6502.h"
 
+// If you uncomment the below and rebuild, you'll get a stream of
+// disassembly, register and stack state printed to stdout:
 //#define PRINT_DEBUG_OUTPUT
 
 //
@@ -191,55 +195,74 @@ MCS6502Instruction MCS6502Instructions[] = {
     { 0x9A, "TXS", MCS6502AddressingImplied, 2, false },
     { 0x98, "TYA", MCS6502AddressingImplied, 2, false }
 };
-
-// Local (private) helper objects and functions.
+// The above instructions are inserted into this indexed jump table the
+// first time someone calls init, below.
 static MCS6502Instruction *MCS6502OpcodeTable[256];
-// Interrupts
-static void HandleIRQ(MCS6502CPU * cpu, MCS6502DataBus * dataBus);
-static void HandleNMI(MCS6502CPU * cpu, MCS6502DataBus * dataBus);
-// Routines used in performing instructions
-static inline void PushByte(uint8 byte, MCS6502CPU * cpu, MCS6502DataBus * dataBus);
-static inline void PushFlags(bool b, MCS6502CPU * cpu, MCS6502DataBus * dataBus);
-static inline uint8 PullByte(MCS6502CPU * cpu, MCS6502DataBus * dataBus);
-static uint16 EffectiveOperandAddressForInstruction(MCS6502CPU * cpu, MCS6502Instruction * instruction, MCS6502DataBus * dataBus);
-static uint8 OperandValueForCurrentInstruction(MCS6502CPU * cpu, MCS6502Instruction * instruction, MCS6502DataBus * dataBus);
-static void WriteResultForCurrentInstruction(uint8 result, MCS6502CPU * cpu, MCS6502Instruction * instruction, MCS6502DataBus * dataBus);
-static int LengthForInstruction(MCS6502Instruction * instruction);
-static inline uint16 ReadWordAtAddress(MCS6502DataBus * dataBus, uint16 addr);
-static inline void ExecuteConditionalBranch(int condition, MCS6502CPU * cpu, MCS6502Instruction * instruction, MCS6502DataBus * dataBus);
+
+//
+// Forward declarations of local private routines.
+//
+
+static inline uint8 MCS6502ReadByte(uint16 addr, MCS6502ExecutionContext * ctx);
+static inline void MCS6502WriteByte(uint16 addr, uint8 byte, MCS6502ExecutionContext * ctx);
+static inline void PushByte(uint8 byte, MCS6502ExecutionContext * context);
+static inline void PushFlags(bool b, MCS6502ExecutionContext * context);
+static inline uint8 PullByte(MCS6502ExecutionContext * context);
+static inline uint16 ReadWordAtAddress(uint16 addr, MCS6502ExecutionContext * context);
 static inline uint8 BCDFromInteger(int integer);
 static inline int IntegerFromBCD(uint8 bcd);
-// Flag handling helpers
-static inline void SetCarry(MCS6502CPU * cpu) { cpu->p |= MCS6502_STATUS_C; }
-static inline void ClearCarry(MCS6502CPU * cpu) { cpu->p &= (~MCS6502_STATUS_C); }
-static inline bool IsCarrySet(MCS6502CPU * cpu) { return (cpu->p & MCS6502_STATUS_C) > 0; }
-static inline void SetOrClearCarry(MCS6502CPU * cpu, bool c);
-static inline void SetZero(MCS6502CPU * cpu) { cpu->p |= MCS6502_STATUS_Z; }
-static inline void ClearZero(MCS6502CPU * cpu) { cpu->p &= (~MCS6502_STATUS_Z); }
-static inline bool IsZeroSet(MCS6502CPU * cpu) { return (cpu->p & MCS6502_STATUS_Z) > 0; }
-static inline void UpdateZero(MCS6502CPU * cpu, uint8 val);
-static inline void SetInterruptDisable(MCS6502CPU * cpu) { cpu->p |= MCS6502_STATUS_I; }
-static inline void ClearInterruptDisable(MCS6502CPU * cpu) { cpu->p &= (~MCS6502_STATUS_I); }
-static inline bool IsInterruptDisableSet(MCS6502CPU * cpu) { return (cpu->p & MCS6502_STATUS_I) > 0; }
-static inline void SetDecimal(MCS6502CPU * cpu) { cpu->p |= MCS6502_STATUS_D; }
-static inline void ClearDecimal(MCS6502CPU * cpu) { cpu->p &= (~MCS6502_STATUS_D); }
-static inline bool IsDecimalSet(MCS6502CPU * cpu) { return (cpu->p & MCS6502_STATUS_D) > 0; }
-static inline void ClearNegative(MCS6502CPU * cpu) { cpu->p &= (~MCS6502_STATUS_N); }
-static inline void UpdateNegative(MCS6502CPU * cpu, uint8 val);
-static inline bool IsNegativeSet(MCS6502CPU * cpu) { return (cpu->p & MCS6502_STATUS_N) > 0; }
-static inline void ClearOverflow(MCS6502CPU * cpu) { cpu->p &= (~MCS6502_STATUS_V); }
-static inline bool IsOverflowSet(MCS6502CPU * cpu) { return (cpu->p & MCS6502_STATUS_V) > 0; }
-static inline void SetOrClearOverflow(MCS6502CPU * cpu, bool v);
-static inline void UpdateZeroNegative(MCS6502CPU * cpu, uint8 val);
-// DEBUG
-char * DisassembleCurrentInstruction(MCS6502Instruction * instruction, MCS6502CPU * cpu, MCS6502DataBus * dataBus);
 
-// Macros to simplify the readability of the call site for data bus access.
-// Assumes a expression of type MCS6502DataBus* named "dataBus" is in scope.
-// This is sort of janky but I am still figuring out how to do it more cleanly
-// so it's readable 
-#define DATABUS_READ_BYTE(addr)     (dataBus->readByte((addr), dataBus->context))
-#define DATABUS_WRITE_BYTE(addr, b) (dataBus->writeByte((addr), (b), dataBus->context))
+static void HandleIRQ(MCS6502ExecutionContext * context);
+static void HandleNMI(MCS6502ExecutionContext * context);
+
+static uint16 EffectiveOperandAddressForInstruction(MCS6502Instruction * instruction, MCS6502ExecutionContext * context, bool * crossesPageBoundary);
+static uint8 ReadOperandValueForCurrentInstruction(MCS6502Instruction * instruction, MCS6502ExecutionContext * context);
+static void WriteResultForCurrentInstruction(uint8 result, MCS6502Instruction * instruction, MCS6502ExecutionContext * context);
+static int LengthForInstruction(MCS6502Instruction * instruction);
+static void ExecuteConditionalBranch(bool condition, MCS6502Instruction * instruction, MCS6502ExecutionContext * context);
+
+//
+// Status flag helpers.
+//
+
+#define CTXP_SET(f) (context->p |= (f))
+#define CTXP_CLEAR(f) (context->p &= (~(f)))
+#define CTXP_ISSET(f) ((context->p & (f)) != 0)
+static inline void SetCarry(MCS6502ExecutionContext * context) { CTXP_SET(MCS6502_STATUS_C); }
+static inline void ClearCarry(MCS6502ExecutionContext * context) { CTXP_CLEAR(MCS6502_STATUS_C); }
+static inline bool IsCarrySet(MCS6502ExecutionContext * context) { return CTXP_ISSET(MCS6502_STATUS_C); }
+static inline void SetOrClearCarry(bool c, MCS6502ExecutionContext * context) { if (c) { SetCarry(context); } else { ClearCarry(context); } }
+
+static inline void SetZero(MCS6502ExecutionContext * context) { CTXP_SET(MCS6502_STATUS_Z); }
+static inline void ClearZero(MCS6502ExecutionContext * context) { CTXP_CLEAR(MCS6502_STATUS_Z); }
+static inline bool IsZeroSet(MCS6502ExecutionContext * context) { return CTXP_ISSET(MCS6502_STATUS_Z); }
+static inline void UpdateZero(uint8 val, MCS6502ExecutionContext * context) { if (val == 0) { SetZero(context); } else { ClearZero(context); } }
+
+static inline void SetInterruptDisable(MCS6502ExecutionContext * context) { CTXP_SET(MCS6502_STATUS_I);  }
+static inline void ClearInterruptDisable(MCS6502ExecutionContext * context) { CTXP_CLEAR(MCS6502_STATUS_I); }
+static inline bool IsInterruptDisableSet(MCS6502ExecutionContext * context) { return CTXP_ISSET(MCS6502_STATUS_I); }
+
+static inline void SetDecimal(MCS6502ExecutionContext * context) { CTXP_SET(MCS6502_STATUS_D); }
+static inline void ClearDecimal(MCS6502ExecutionContext * context) { CTXP_CLEAR(MCS6502_STATUS_D); }
+static inline bool IsDecimalSet(MCS6502ExecutionContext * context) { return CTXP_ISSET(MCS6502_STATUS_D); }
+
+static inline void SetNegative(MCS6502ExecutionContext * context) { CTXP_SET(MCS6502_STATUS_N); }
+static inline void ClearNegative(MCS6502ExecutionContext * context) { CTXP_CLEAR(MCS6502_STATUS_N); }
+static inline bool IsNegativeSet(MCS6502ExecutionContext * context) { return CTXP_ISSET(MCS6502_STATUS_N); }
+static inline void UpdateNegative(uint8 val, MCS6502ExecutionContext * context) { if ((val & 0x80) != 0) { SetNegative(context); } else { ClearNegative(context); } }
+
+static inline void SetOverflow(MCS6502ExecutionContext * context) { CTXP_SET(MCS6502_STATUS_V); }
+static inline void ClearOverflow(MCS6502ExecutionContext * context) { CTXP_CLEAR(MCS6502_STATUS_V); }
+static inline bool IsOverflowSet(MCS6502ExecutionContext * context) { return CTXP_ISSET(MCS6502_STATUS_V); }
+static inline void SetOrClearOverflow(bool v, MCS6502ExecutionContext * context) { if (v) { SetOverflow(context); } else { ClearOverflow(context); } }
+
+static inline void UpdateZeroNegative(uint8 val, MCS6502ExecutionContext * context) { UpdateZero(val, context); UpdateNegative(val, context); }
+#undef CTXP_SET
+#undef CTXP_CLEAR
+#undef CTXP_ISSET
+
+// Debug helper:
+char * DisassembleCurrentInstruction(MCS6502Instruction * instruction, MCS6502ExecutionContext * context);
 
 //
 // Public functions
@@ -247,108 +270,154 @@ char * DisassembleCurrentInstruction(MCS6502Instruction * instruction, MCS6502CP
 
 void
 MCS6502Init(
-    MCS6502CPU * cpu
+    MCS6502ExecutionContext * context,
+    MCS6502DataReadByteFunction readByteFn,
+    MCS6502DataWriteByteFunction writeByteFn,
+    void * readWriteContext
 )
 {
-    // Blank out the CPU state.
-    memset(cpu, sizeof(MCS6502CPU), 0);
+    // Blank out the context state.
+    memset(context, sizeof(MCS6502ExecutionContext), 0);
     
-    // Set up static sorted opcode jump table. Zero out the table first so that
-    // all unoccupied slots (invalid opcodes) will be NULL. Calling init more
-    // than once doesn't hurt anything so no need to prevent double setup.
-    memset(&MCS6502OpcodeTable[0], sizeof(MCS6502OpcodeTable), 0);
-    int instructionCount = sizeof(MCS6502Instructions)/sizeof(MCS6502Instructions[0]);
-    for (int i = 0; i < instructionCount; i++) {
-        MCS6502Instruction * instruction = &MCS6502Instructions[i];
-        MCS6502OpcodeTable[instruction->opcode] = instruction;
+    // Setup the data access functions.
+    context->readByte = readByteFn;
+    context->writeByte = writeByteFn;
+    context->readWriteContext = readWriteContext;
+    
+    // Set up our static sorted opcode jump table. Zero out the table first so that
+    // all unoccupied slots (invalid opcodes) will be NULL.
+    static bool opcodesReady = false;
+    if (!opcodesReady) {
+        memset(&MCS6502OpcodeTable[0], sizeof(MCS6502OpcodeTable), 0);
+        int instructionCount = sizeof(MCS6502Instructions)/sizeof(MCS6502Instructions[0]);
+        for (int i = 0; i < instructionCount; i++) {
+            MCS6502Instruction * instruction = &MCS6502Instructions[i];
+            MCS6502OpcodeTable[instruction->opcode] = instruction;
+        }
+        opcodesReady = true;
     }
 }
 
-void MCS6502Reset(MCS6502CPU * cpu, MCS6502DataBus * dataBus)
+void
+MCS6502Reset(
+    MCS6502ExecutionContext * context
+)
 {
-    cpu->a = 0;
-    cpu->x = 0;
-    cpu->y = 0;
-    cpu->p = MCS6502_STATUS_I;  // 6502 starts with interrupts disabled.
+    context->a = 0;
+    context->x = 0;
+    context->y = 0;
+    context->p = MCS6502_STATUS_I;  // 6502 starts with interrupts disabled.
     
     // Stack pointer starts at top of page 1, but lands at 0xFD (rather than 0xFF)
     // after the hardware startup is complete.
-    cpu->sp = 0xFD;
+    context->sp = 0xFD;
     
     // Jump to the address given at the reset vector location.
-    cpu->pc = ReadWordAtAddress(dataBus, MCS6502_RESET);
+    context->pc = ReadWordAtAddress(MCS6502_RESET, context);
 }
 
-void MCS6502IRQ(MCS6502CPU * cpu, MCS6502DataBus * dataBus)
+void
+MCS6502IRQ(
+   MCS6502ExecutionContext * context
+)
 {
-    if (IsInterruptDisableSet(cpu)) {
+    if (IsInterruptDisableSet(context)) {
         return;
     }
     
-    if (cpu->timing > 0) {
-        cpu->irqPending = true;
+    if (context->pendingTiming > 0) {
+        context->irqPending = true;
         return;
     }
     
-    HandleIRQ(cpu, dataBus);
+    HandleIRQ(context);
+    context->pendingTiming = context->timingForLastOperation;
 }
 
-void MCS6502NMI(MCS6502CPU * cpu, MCS6502DataBus * dataBus)
+void
+MCS6502NMI(
+   MCS6502ExecutionContext * context
+)
 {
-    if (cpu->timing > 0) {
-        cpu->nmiPending = true;
+    if (context->pendingTiming > 0) {
+        context->nmiPending = true;
         return;
     }
     
-    HandleNMI(cpu, dataBus);
+    HandleNMI(context);
+    context->pendingTiming = context->timingForLastOperation;
 }
 
 MCS6502ExecResult
 MCS6502Tick(
-    MCS6502CPU * cpu,
-    MCS6502DataBus * dataBus
+    MCS6502ExecutionContext * context
 )
 {
     // If there are ticks pending to run down, decrement and leave.
-    if (cpu->timing > 0) {
-        cpu->timing--;
-        if (cpu->timing == 0) {
-            return MCS6502ExecResultCompleted;
-        }
-        return MCS6502ExecResultPending;
+    if (context->pendingTiming > 0) {
+        context->pendingTiming--;
+        return MCS6502ExecResultRunning;
     }
+    
+    // If nothing is pending, execute the next instruction.
+    MCS6502ExecResult result = MCS6502ExecNext(context);
+    
+    // Assign the operation's cycle count to the pending count, then
+    // decrement it to represent one tick.
+    context->pendingTiming = context->timingForLastOperation;
+    context->pendingTiming--;
+    
+    return result;
+}
+
+MCS6502ExecResult
+MCS6502ExecNext(
+    MCS6502ExecutionContext * context
+)
+{
+    // We expect to be called either by the tick function when there is nothing
+    // pending, or by an external caller directly who intends to immediately
+    // perform the next instruction. Zero out the tick counts in case
+    // we are looking at the latter situation, because it doesn't matter.
+    context->pendingTiming = 0;
+    
+    // Zero out the timing for this coming operation. We may increment it in multiple
+    // places depending on the addressing.
+    context->timingForLastOperation = 0;
     
     // If an interrupt is scheduled, do that instead of proceeding with
     // standard fetch. NMI takes precedence.
-    if (cpu->nmiPending) {
-        HandleNMI(cpu, dataBus);
-        cpu->timing--;
-        return MCS6502ExecResultPending;
+    if (context->nmiPending) {
+        HandleNMI(context);
+        return MCS6502ExecResultRunning;
     }
     
-    if (cpu->irqPending) {
-        HandleIRQ(cpu, dataBus);
-        cpu->timing--;
-        return MCS6502ExecResultPending;
+    if (context->irqPending) {
+        HandleIRQ(context);
+        return MCS6502ExecResultRunning;
     }
     
     // Fetch opcode
-    uint8 opcode = DATABUS_READ_BYTE(cpu->pc);
+    uint8 opcode = MCS6502ReadByte(context->pc, context);
     MCS6502Instruction * instruction = MCS6502OpcodeTable[opcode];
     if (!instruction) {
         return MCS6502ExecResultInvalidOperation;
     }
     
 #ifdef PRINT_DEBUG_OUTPUT
-    char * dis = DisassembleCurrentInstruction(instruction, cpu, dataBus);
-    printf("%04X: %s\n", cpu->pc, dis);
+    char * dis = DisassembleCurrentInstruction(instruction, context);
+    printf("%04X: %s\n", context->pc, dis);
 #endif
     
     // All instructions will update the PC based on the length of the instruction,
     // except instructions that modify the PC directly. Flag those situations so
     // we can suppress the default behavior later.
-    int doNotUpdatePC = 0;
-    uint16 originalPC = cpu->pc;
+    bool doNotUpdatePC = false;
+    
+    // Track the original PC value so that we can known whether we are infinite-looping
+    // on the same address (ie, a halt). An interrupt of some kind will kick the CPU
+    // out of that state, but it's useful to be able to flag it.
+    uint16 originalPC = context->pc;
     
     // Decode and execute op
     switch (opcode) {
@@ -362,29 +431,29 @@ MCS6502Tick(
         case 0x61:
         case 0x71:
         {
-            uint8 operand = OperandValueForCurrentInstruction(cpu, instruction, dataBus);
+            uint8 operand = ReadOperandValueForCurrentInstruction(instruction, context);
          
-            if (!IsDecimalSet(cpu)) {
-                unsigned int sum = cpu->a + operand + (IsCarrySet(cpu) ? 1 : 0);
+            if (!IsDecimalSet(context)) {
+                unsigned int sum = context->a + operand + (IsCarrySet(context) ? 1 : 0);
                 // Overflow flag is set if the twos complement (signed) result is > +127 or < -128.
                 // The simplest way for us to do this is just do the addition as signed values and check.
-                int vres = (signed char)cpu->a + (signed char)operand + (IsCarrySet(cpu) ? 1 : 0);
-                cpu->a = sum & 0xFF;
-                SetOrClearCarry(cpu, (sum > 0xFF));
-                UpdateZeroNegative(cpu, cpu->a);
-                SetOrClearOverflow(cpu, (vres > 127 || vres < -128));
+                int vres = (signed char)context->a + (signed char)operand + (IsCarrySet(context) ? 1 : 0);
+                context->a = sum & 0xFF;
+                SetOrClearCarry((sum > 0xFF), context);
+                UpdateZeroNegative(context->a, context);
+                SetOrClearOverflow((vres > 127 || vres < -128), context);
             } else {
                 int operandInteger = IntegerFromBCD(operand);
-                int accInteger = IntegerFromBCD(cpu->a);
-                int sum = operandInteger + accInteger + (IsCarrySet(cpu) ? 1 : 0);
+                int accInteger = IntegerFromBCD(context->a);
+                int sum = operandInteger + accInteger + (IsCarrySet(context) ? 1 : 0);
                 if (sum > 99) {
-                    SetCarry(cpu);
+                    SetCarry(context);
                     sum -= 100;
                 } else {
-                    ClearCarry(cpu);
+                    ClearCarry(context);
                 }
-                cpu->a = BCDFromInteger(sum);
-                UpdateZeroNegative(cpu, cpu->a);
+                context->a = BCDFromInteger(sum);
+                UpdateZeroNegative(context->a, context);
                 // Don't do anything to overflow flag. It's not documented behavior.
             }
             break;
@@ -400,9 +469,9 @@ MCS6502Tick(
         case 0x21:
         case 0x31:
         {
-            uint8 operand = OperandValueForCurrentInstruction(cpu, instruction, dataBus);
-            cpu->a = cpu->a & operand;
-            UpdateZeroNegative(cpu, cpu->a);
+            uint8 operand = ReadOperandValueForCurrentInstruction(instruction, context);
+            context->a = context->a & operand;
+            UpdateZeroNegative(context->a, context);
             break;
         }
             
@@ -413,35 +482,35 @@ MCS6502Tick(
         case 0x0E:
         case 0x1E:
         {
-            uint8 operand = OperandValueForCurrentInstruction(cpu, instruction, dataBus);
-            SetOrClearCarry(cpu, (operand & 0x80) != 0);
+            uint8 operand = ReadOperandValueForCurrentInstruction(instruction, context);
+            SetOrClearCarry((operand & 0x80) != 0, context);
             operand <<= 1;
-            UpdateZeroNegative(cpu, operand);
-            WriteResultForCurrentInstruction(operand, cpu, instruction, dataBus);
+            UpdateZeroNegative(operand, context);
+            WriteResultForCurrentInstruction(operand, instruction, context);
             break;
         }
             
         // BCC
         case 0x90:
         {
-            ExecuteConditionalBranch(!IsCarrySet(cpu), cpu, instruction, dataBus);
-            doNotUpdatePC = 1;
+            ExecuteConditionalBranch(!IsCarrySet(context), instruction, context);
+            doNotUpdatePC = true;
             break;
         }
             
         // BCS
         case 0xB0:
         {
-            ExecuteConditionalBranch(IsCarrySet(cpu), cpu, instruction, dataBus);
-            doNotUpdatePC = 1;
+            ExecuteConditionalBranch(IsCarrySet(context), instruction, context);
+            doNotUpdatePC = true;
             break;
         }
             
         // BEQ
         case 0xF0:
         {
-            ExecuteConditionalBranch(IsZeroSet(cpu), cpu, instruction, dataBus);
-            doNotUpdatePC = 1;
+            ExecuteConditionalBranch(IsZeroSet(context), instruction, context);
+            doNotUpdatePC = true;
             break;
         }
             
@@ -449,92 +518,92 @@ MCS6502Tick(
         case 0x24:
         case 0x2C:
         {
-            uint8 operand = OperandValueForCurrentInstruction(cpu, instruction, dataBus);
-            uint8 and = cpu->a & operand;
-            UpdateNegative(cpu, operand);
-            UpdateZero(cpu, and);
-            SetOrClearOverflow(cpu, (operand & 0x40) > 0);
+            uint8 operand = ReadOperandValueForCurrentInstruction(instruction, context);
+            uint8 and = context->a & operand;
+            UpdateNegative(operand, context);
+            UpdateZero(and, context);
+            SetOrClearOverflow((operand & 0x40) > 0, context);
             break;
         }
             
         // BMI
         case 0x30:
         {
-            ExecuteConditionalBranch(IsNegativeSet(cpu), cpu, instruction, dataBus);
-            doNotUpdatePC = 1;
+            ExecuteConditionalBranch(IsNegativeSet(context), instruction, context);
+            doNotUpdatePC = true;
             break;
         }
             
         // BNE
         case 0xD0:
         {
-            ExecuteConditionalBranch(!IsZeroSet(cpu), cpu, instruction, dataBus);
-            doNotUpdatePC = 1;
+            ExecuteConditionalBranch(!IsZeroSet(context), instruction, context);
+            doNotUpdatePC = true;
             break;
         }
             
         // BPL
         case 0x10:
         {
-            ExecuteConditionalBranch(!IsNegativeSet(cpu), cpu, instruction, dataBus);
-            doNotUpdatePC = 1;
+            ExecuteConditionalBranch(!IsNegativeSet(context), instruction, context);
+            doNotUpdatePC = true;
             break;
         }
             
         // BRK
         case 0x00:
         {
-            uint16 nextPC = cpu->pc + 2;  // BRK can replace a 2-byte instruction; RTI returns to actual PC.
-            PushByte((nextPC >> 8) & 0xFF, cpu, dataBus);
-            PushByte(nextPC & 0xFF, cpu, dataBus);
-            PushFlags(true, cpu, dataBus);
-            SetInterruptDisable(cpu);
-            cpu->pc = ReadWordAtAddress(dataBus, MCS6502_IRQ_BRK);
-            doNotUpdatePC = 1;
+            uint16 nextPC = context->pc + 2;  // BRK can replace a 2-byte instruction; RTI returns to actual PC.
+            PushByte((nextPC >> 8) & 0xFF, context);
+            PushByte(nextPC & 0xFF, context);
+            PushFlags(true, context);
+            SetInterruptDisable(context);
+            context->pc = ReadWordAtAddress(MCS6502_IRQ_BRK, context);
+            doNotUpdatePC = true;
             break;
         }
             
         // BVC
         case 0x50:
         {
-            ExecuteConditionalBranch(!IsOverflowSet(cpu), cpu, instruction, dataBus);
-            doNotUpdatePC = 1;
+            ExecuteConditionalBranch(!IsOverflowSet(context), instruction, context);
+            doNotUpdatePC = true;
             break;
         }
             
         // BVS
         case 0x70:
         {
-            ExecuteConditionalBranch(IsOverflowSet(cpu), cpu, instruction, dataBus);
-            doNotUpdatePC = 1;
+            ExecuteConditionalBranch(IsOverflowSet(context), instruction, context);
+            doNotUpdatePC = true;
             break;
         }
             
         // CLC
         case 0x18:
         {
-            ClearCarry(cpu);
+            ClearCarry(context);
             break;
         }
             
         // CLD
         case 0xD8:
         {
-            ClearDecimal(cpu);
+            ClearDecimal(context);
             break;
         }
             
         // CLI
         case 0x58:
         {
-            ClearInterruptDisable(cpu);
+            ClearInterruptDisable(context);
             break;
         }
             
         // CLV
         case 0xB8:
         {
-            ClearOverflow(cpu);
+            ClearOverflow(context);
             break;
         }
             
@@ -548,10 +617,10 @@ MCS6502Tick(
         case 0xC1:
         case 0xD1:
         {
-            uint8 operand = OperandValueForCurrentInstruction(cpu, instruction, dataBus);
-            SetOrClearCarry(cpu, (cpu->a >= operand));
-            UpdateZero(cpu, (cpu->a - operand));
-            UpdateNegative(cpu, (cpu->a - operand));
+            uint8 operand = ReadOperandValueForCurrentInstruction(instruction, context);
+            SetOrClearCarry((context->a >= operand), context);
+            UpdateZero((context->a - operand), context);
+            UpdateNegative((context->a - operand), context);
             break;
         }
             
@@ -560,10 +629,10 @@ MCS6502Tick(
         case 0xE4:
         case 0xEC:
         {
-            uint8 operand = OperandValueForCurrentInstruction(cpu, instruction, dataBus);
-            SetOrClearCarry(cpu, (cpu->x >= operand));
-            UpdateZero(cpu, (cpu->x - operand));
-            UpdateNegative(cpu, (cpu->x - operand));
+            uint8 operand = ReadOperandValueForCurrentInstruction(instruction, context);
+            SetOrClearCarry((context->x >= operand), context);
+            UpdateZero((context->x - operand), context);
+            UpdateNegative((context->x - operand), context);
             break;
         }
             
@@ -572,10 +641,10 @@ MCS6502Tick(
         case 0xC4:
         case 0xCC:
         {
-            uint8 operand = OperandValueForCurrentInstruction(cpu, instruction, dataBus);
-            SetOrClearCarry(cpu, (cpu->y >= operand));
-            UpdateZero(cpu, (cpu->y - operand));
-            UpdateNegative(cpu, (cpu->y - operand));
+            uint8 operand = ReadOperandValueForCurrentInstruction(instruction, context);
+            SetOrClearCarry((context->y >= operand), context);
+            UpdateZero((context->y - operand), context);
+            UpdateNegative((context->y - operand), context);
             break;
         }
             
@@ -585,26 +654,26 @@ MCS6502Tick(
         case 0xCE:
         case 0xDE:
         {
-            uint8 operand = OperandValueForCurrentInstruction(cpu, instruction, dataBus);
+            uint8 operand = ReadOperandValueForCurrentInstruction(instruction, context);
             operand--;
-            WriteResultForCurrentInstruction(operand, cpu, instruction, dataBus);
-            UpdateZeroNegative(cpu, operand);
+            WriteResultForCurrentInstruction(operand, instruction, context);
+            UpdateZeroNegative(operand, context);
             break;
         }
             
         // DEX
         case 0xCA:
         {
-            cpu->x = cpu->x - 1;
-            UpdateZeroNegative(cpu, cpu->x);
+            context->x = context->x - 1;
+            UpdateZeroNegative(context->x, context);
             break;
         }
             
         // DEY
         case 0x88:
         {
-            cpu->y = cpu->y - 1;
-            UpdateZeroNegative(cpu, cpu->y);
+            context->y = context->y - 1;
+            UpdateZeroNegative(context->y, context);
             break;
         }
             
@@ -618,9 +687,9 @@ MCS6502Tick(
         case 0x41:
         case 0x51:
         {
-            uint8 operand = OperandValueForCurrentInstruction(cpu, instruction, dataBus);
-            cpu->a = cpu->a ^ operand;
-            UpdateZeroNegative(cpu, cpu->a);
+            uint8 operand = ReadOperandValueForCurrentInstruction(instruction, context);
+            context->a = context->a ^ operand;
+            UpdateZeroNegative(context->a, context);
             break;
         }
             
@@ -630,29 +699,26 @@ MCS6502Tick(
         case 0xEE:
         case 0xFE:
         {
-            //XXX: This simplified code doesn't "cache" the memory address between the
-            // read and the result write, so we'll end up reading that twice. That's not
-            // what the real CPU would do.
-            uint8 operand = OperandValueForCurrentInstruction(cpu, instruction, dataBus);
+            uint8 operand = ReadOperandValueForCurrentInstruction(instruction, context);
             operand++;
-            WriteResultForCurrentInstruction(operand, cpu, instruction, dataBus);
-            UpdateZeroNegative(cpu, operand);
+            WriteResultForCurrentInstruction(operand, instruction, context);
+            UpdateZeroNegative(operand, context);
             break;
         }
             
         // INX
         case 0xE8:
         {
-            cpu->x = cpu->x + 1;
-            UpdateZeroNegative(cpu, cpu->x);
+            context->x = context->x + 1;
+            UpdateZeroNegative(context->x, context);
             break;
         }
             
         // INY
         case 0xC8:
         {
-            cpu->y = cpu->y + 1;
-            UpdateZeroNegative(cpu, cpu->y);
+            context->y = context->y + 1;
+            UpdateZeroNegative(context->y, context);
             break;
         }
             
@@ -660,22 +726,22 @@ MCS6502Tick(
         case 0x4C:
         case 0x6C:
         {
-            cpu->pc = EffectiveOperandAddressForInstruction(cpu, instruction, dataBus);
-            doNotUpdatePC = 1;
+            context->pc = EffectiveOperandAddressForInstruction(instruction, context, NULL);
+            doNotUpdatePC = true;
             break;
         }
             
         // JSR
         case 0x20:
         {
-            uint16 destAddr = EffectiveOperandAddressForInstruction(cpu, instruction, dataBus);
-            uint16 returnAddr = cpu->pc + 2;
+            uint16 destAddr = EffectiveOperandAddressForInstruction(instruction, context, NULL);
+            uint16 returnAddr = context->pc + 2;
             // Push address of last byte of the JSR instruction, high byte first.
             // RTS will always come back to address+1, hence the off by one push.
-            PushByte(((returnAddr >> 8) & 0xFF), cpu, dataBus);
-            PushByte((returnAddr & 0xFF), cpu, dataBus);
-            cpu->pc = destAddr;
-            doNotUpdatePC = 1;
+            PushByte(((returnAddr >> 8) & 0xFF), context);
+            PushByte((returnAddr & 0xFF), context);
+            context->pc = destAddr;
+            doNotUpdatePC = true;
             break;
         }
             
@@ -689,9 +755,9 @@ MCS6502Tick(
         case 0xA1:
         case 0xB1:
         {
-            uint8 operand = OperandValueForCurrentInstruction(cpu, instruction, dataBus);
-            cpu->a = operand;
-            UpdateZeroNegative(cpu, operand);
+            uint8 operand = ReadOperandValueForCurrentInstruction(instruction, context);
+            context->a = operand;
+            UpdateZeroNegative(operand, context);
             break;
         }
             
@@ -702,9 +768,9 @@ MCS6502Tick(
         case 0xAE:
         case 0xBE:
         {
-            uint8 operand = OperandValueForCurrentInstruction(cpu, instruction, dataBus);
-            cpu->x = operand;
-            UpdateZeroNegative(cpu, cpu->x);
+            uint8 operand = ReadOperandValueForCurrentInstruction(instruction, context);
+            context->x = operand;
+            UpdateZeroNegative(context->x, context);
             break;
         }
             
@@ -715,9 +781,9 @@ MCS6502Tick(
         case 0xAC:
         case 0xBC:
         {
-            uint8 operand = OperandValueForCurrentInstruction(cpu, instruction, dataBus);
-            cpu->y = operand;
-            UpdateZeroNegative(cpu, cpu->y);
+            uint8 operand = ReadOperandValueForCurrentInstruction(instruction, context);
+            context->y = operand;
+            UpdateZeroNegative(context->y, context);
             break;
         }
             
@@ -728,13 +794,13 @@ MCS6502Tick(
         case 0x4E:
         case 0x5E:
         {
-            uint8 operand = OperandValueForCurrentInstruction(cpu, instruction, dataBus);
-            SetOrClearCarry(cpu, (operand & 0x01) != 0);
+            uint8 operand = ReadOperandValueForCurrentInstruction(instruction, context);
+            SetOrClearCarry((operand & 0x01) != 0, context);
             operand >>= 1;
             operand &= 0x7F;
-            UpdateZero(cpu, operand);
-            ClearNegative(cpu);
-            WriteResultForCurrentInstruction(operand, cpu, instruction, dataBus);
+            UpdateZero(operand, context);
+            ClearNegative(context);
+            WriteResultForCurrentInstruction(operand, instruction, context);
             break;
         }
             
@@ -755,40 +821,40 @@ MCS6502Tick(
         case 0x01:
         case 0x11:
         {
-            uint8 operand = OperandValueForCurrentInstruction(cpu, instruction, dataBus);
-            cpu->a = cpu->a | operand;
-            UpdateZeroNegative(cpu, cpu->a);
+            uint8 operand = ReadOperandValueForCurrentInstruction(instruction, context);
+            context->a = context->a | operand;
+            UpdateZeroNegative(context->a, context);
             break;
         }
             
         // PHA
         case 0x48:
         {
-            PushByte(cpu->a, cpu, dataBus);
+            PushByte(context->a, context);
             break;
         }
             
         // PHP
         case 0x08:
         {
-            PushFlags(true, cpu, dataBus);
+            PushFlags(true, context);
             break;
         }
             
         // PLA
         case 0x68:
         {
-            cpu->a = PullByte(cpu, dataBus);
-            UpdateZeroNegative(cpu, cpu->a);
+            context->a = PullByte(context);
+            UpdateZeroNegative(context->a, context);
             break;
         }
             
         // PLP
         case 0x28:
         {
-            uint8 p = PullByte(cpu, dataBus);
+            uint8 p = PullByte(context);
             p &= ~(0x20 | MCS6502_STATUS_B);
-            cpu->p = p;
+            context->p = p;
             break;
         }
             
@@ -799,14 +865,14 @@ MCS6502Tick(
         case 0x2E:
         case 0x3E:
         {
-            uint8 operand = OperandValueForCurrentInstruction(cpu, instruction, dataBus);
-            int initialCarry = IsCarrySet(cpu);
-            SetOrClearCarry(cpu, (operand & 0x80) > 0);
+            uint8 operand = ReadOperandValueForCurrentInstruction(instruction, context);
+            bool initialCarry = IsCarrySet(context);
+            SetOrClearCarry((operand & 0x80) > 0, context);
             operand <<= 1;
             operand &= 0xFE;
-            operand |= (initialCarry ? 0x1 : 0);
-            WriteResultForCurrentInstruction(operand, cpu, instruction, dataBus);
-            UpdateZeroNegative(cpu, operand);
+            operand |= (initialCarry ? 0x1 : 0x0);
+            WriteResultForCurrentInstruction(operand, instruction, context);
+            UpdateZeroNegative(operand, context);
             break;
         }
             
@@ -817,37 +883,37 @@ MCS6502Tick(
         case 0x6E:
         case 0x7E:
         {
-            uint8 operand = OperandValueForCurrentInstruction(cpu, instruction, dataBus);
-            int initialCarry = IsCarrySet(cpu);
-            SetOrClearCarry(cpu, (operand & 0x01) > 0);
+            uint8 operand = ReadOperandValueForCurrentInstruction(instruction, context);
+            int initialCarry = IsCarrySet(context);
+            SetOrClearCarry((operand & 0x01) > 0, context);
             operand >>= 1;
             operand &= 0x7F;
             operand |= (initialCarry ? 0x80 : 0);
-            WriteResultForCurrentInstruction(operand, cpu, instruction, dataBus);
-            UpdateZeroNegative(cpu, operand);
+            WriteResultForCurrentInstruction(operand, instruction, context);
+            UpdateZeroNegative(operand, context);
             break;
         }
             
         // RTI
         case 0x40:
         {
-            uint8 p = PullByte(cpu, dataBus);
+            uint8 p = PullByte(context);
             p &= ~(0x20 | MCS6502_STATUS_B);
-            cpu->p = p;
-            uint8 lo = PullByte(cpu, dataBus);
-            uint8 hi = PullByte(cpu, dataBus);
-            cpu->pc = ((hi << 8) | lo);
-            doNotUpdatePC = 1;
+            context->p = p;
+            uint8 lo = PullByte(context);
+            uint8 hi = PullByte(context);
+            context->pc = ((hi << 8) | lo);
+            doNotUpdatePC = true;
             break;
         }
             
         // RTS
         case 0x60:
         {
-            uint8 lo = PullByte(cpu, dataBus);
-            uint8 hi = PullByte(cpu, dataBus);
-            cpu->pc = ((hi << 8) | lo) + 1;
-            doNotUpdatePC = 1;
+            uint8 lo = PullByte(context);
+            uint8 hi = PullByte(context);
+            context->pc = ((hi << 8) | lo) + 1;
+            doNotUpdatePC = true;
             break;
         }
             
@@ -861,31 +927,31 @@ MCS6502Tick(
         case 0xE1:
         case 0xF1:
         {
-            uint8 operand = OperandValueForCurrentInstruction(cpu, instruction, dataBus);
-            if (!IsDecimalSet(cpu)) {
+            uint8 operand = ReadOperandValueForCurrentInstruction(instruction, context);
+            if (!IsDecimalSet(context)) {
                 // SBC is apparently exactly equivalent to ADC with the operand as ones-complement inverted, so:
                 operand = ~operand;
                 //
-                unsigned int sum = cpu->a + operand + (IsCarrySet(cpu) ? 1 : 0);
+                unsigned int sum = context->a + operand + (IsCarrySet(context) ? 1 : 0);
                 // Overflow flag is set if the twos complement (signed) result is > +127 or < -128.
                 // The simplest way for us to do this is just do the addition as signed values and check.
-                int vres = (signed char)cpu->a + (signed char)operand + (IsCarrySet(cpu) ? 1 : 0);
-                cpu->a = sum & 0xFF;
-                SetOrClearCarry(cpu, sum > 0xFF);
-                UpdateZeroNegative(cpu, cpu->a);
-                SetOrClearOverflow(cpu, (vres > 127 || vres < -128));
+                int vres = (signed char)context->a + (signed char)operand + (IsCarrySet(context) ? 1 : 0);
+                context->a = sum & 0xFF;
+                SetOrClearCarry(sum > 0xFF, context);
+                UpdateZeroNegative(context->a, context);
+                SetOrClearOverflow((vres > 127 || vres < -128), context);
             } else {
                 int operandInteger = IntegerFromBCD(operand);
-                int accInteger = IntegerFromBCD(cpu->a);
-                int difference = accInteger - operandInteger - (IsCarrySet(cpu) ? 0 : 1);
+                int accInteger = IntegerFromBCD(context->a);
+                int difference = accInteger - operandInteger - (IsCarrySet(context) ? 0 : 1);
                 if (difference < 0) {
-                    ClearCarry(cpu);
+                    ClearCarry(context);
                     difference += 100;
                 } else {
-                    SetCarry(cpu);
+                    SetCarry(context);
                 }
-                cpu->a = BCDFromInteger(difference);
-                UpdateZeroNegative(cpu, cpu->a);
+                context->a = BCDFromInteger(difference);
+                UpdateZeroNegative(context->a, context);
                 // Don't do anything to overflow flag. It's not documented behavior.
             }
             break;
@@ -894,21 +960,21 @@ MCS6502Tick(
         // SEC
         case 0x38:
         {
-            SetCarry(cpu);
+            SetCarry(context);
             break;
         }
             
         // SED
         case 0xF8:
         {
-            SetDecimal(cpu);
+            SetDecimal(context);
             break;
         }
             
         // SEI
         case 0x78:
         {
-            SetInterruptDisable(cpu);
+            SetInterruptDisable(context);
             break;
         }
             
@@ -921,8 +987,8 @@ MCS6502Tick(
         case 0x81:
         case 0x91:
         {
-            uint16 addr = EffectiveOperandAddressForInstruction(cpu, instruction, dataBus);
-            DATABUS_WRITE_BYTE(addr, cpu->a);
+            uint16 addr = EffectiveOperandAddressForInstruction(instruction, context, NULL);
+            MCS6502WriteByte(addr, context->a, context);
             break;
         }
             
@@ -931,8 +997,8 @@ MCS6502Tick(
         case 0x96:
         case 0x8E:
         {
-            uint16 addr = EffectiveOperandAddressForInstruction(cpu, instruction, dataBus);
-            DATABUS_WRITE_BYTE(addr, cpu->x);
+            uint16 addr = EffectiveOperandAddressForInstruction(instruction, context, NULL);
+            MCS6502WriteByte(addr, context->x, context);
             break;
         }
             
@@ -941,309 +1007,148 @@ MCS6502Tick(
         case 0x94:
         case 0x8C:
         {
-            uint16 addr = EffectiveOperandAddressForInstruction(cpu, instruction, dataBus);
-            DATABUS_WRITE_BYTE(addr, cpu->y);
+            uint16 addr = EffectiveOperandAddressForInstruction(instruction, context, NULL);
+            MCS6502WriteByte(addr, context->y, context);
             break;
         }
             
         // TAX
         case 0xAA:
         {
-            cpu->x = cpu->a;
-            UpdateZeroNegative(cpu, cpu->x);
+            context->x = context->a;
+            UpdateZeroNegative(context->x, context);
             break;
         }
             
         // TAY
         case 0xA8:
         {
-            cpu->y = cpu->a;
-            UpdateZeroNegative(cpu, cpu->y);
+            context->y = context->a;
+            UpdateZeroNegative(context->y, context);
             break;
         }
             
         // TSX
         case 0xBA:
         {
-            cpu->x = cpu->sp;
-            UpdateZeroNegative(cpu, cpu->x);
+            context->x = context->sp;
+            UpdateZeroNegative(context->x, context);
             break;
         }
             
         // TXA
         case 0x8A:
         {
-            cpu->a = cpu->x;
-            UpdateZeroNegative(cpu, cpu->a);
+            context->a = context->x;
+            UpdateZeroNegative(context->a, context);
             break;
         }
             
         // TXS
         case 0x9A:
         {
-            cpu->sp = cpu->x;
+            context->sp = context->x;
             break;
         }
             
         // TYA
         case 0x98:
         {
-            cpu->a = cpu->y;
-            UpdateZeroNegative(cpu, cpu->a);
+            context->a = context->y;
+            UpdateZeroNegative(context->a, context);
             break;
         }
     }
     
     // Update PC and timing
     if (!doNotUpdatePC) {
-        cpu->pc = cpu->pc + LengthForInstruction(instruction);
+        context->pc = context->pc + LengthForInstruction(instruction);
     }
     
 #ifdef PRINT_DEBUG_OUTPUT
-    // Dump the CPU state
-    printf("  PC=%04X SP=0x01%02X A=%02X X=%02X Y=%02X N=%d V=%d D=%d I=%d Z=%d C=%d\n",
-           cpu->pc, cpu->sp, cpu->a, cpu->x, cpu->y,
-           IsNegativeSet(cpu) ? 1 : 0,
-           IsOverflowSet(cpu) ? 1 : 0,
-           IsDecimalSet(cpu) ? 1 : 0,
-           (cpu->p & MCS6502_STATUS_I) > 0 ? 1 : 0,
-           IsZeroSet(cpu) ? 1 : 0,
-           IsCarrySet(cpu) ? 1 : 0);
+    // Dump the context state
+    printf("  PC=%04X SP=01%02X A=%02X X=%02X Y=%02X N=%d V=%d D=%d I=%d Z=%d C=%d\n",
+           context->pc, context->sp, context->a, context->x, context->y,
+           IsNegativeSet(context) ? 1 : 0,
+           IsOverflowSet(context) ? 1 : 0,
+           IsDecimalSet(context) ? 1 : 0,
+           IsInterruptDisableSet(context) ? 1 : 0,
+           IsZeroSet(context) ? 1 : 0,
+           IsCarrySet(context) ? 1 : 0);
     
     // Dump stack
-    if (cpu->sp < 0xFF) {
+    if (context->sp < 0xFF) {
         printf("  STACK: ");
-        for (uint sp = 0xFF; sp > cpu->sp; sp--) {
-            printf("%02X ", DATABUS_READ_BYTE(0x0100 + sp));
+        for (uint sp = 0xFF; sp > context->sp; sp--) {
+            printf("%02X ", MCS6502ReadByte(0x0100 + sp, context));
         }
         printf("\n");
     }
 #endif
     
-    cpu->timing = cpu->timing + instruction->timing;
-    cpu->timing = cpu->timing - 1;
+    // The base timing comes from the instruction data, but it's the final thing
+    // we add in here. In the case of branches, the data specifies zero and we
+    // have already updated the timing explicitly depending on whether the branch was taken.
+    // In several other cases, we will have conditionally added one to the cycle count
+    // in certain address modes depending on runtime indirection conditions.
+    context->timingForLastOperation += instruction->timing;
     
-    if (originalPC == cpu->pc) {
+    if (originalPC == context->pc) {
         return MCS6502ExecResultHalting;
     }
 
-    return MCS6502ExecResultPending;
+    return MCS6502ExecResultRunning;
+}
+
+//
+// This is the "data bus": operations to read and write bytes on the bus.
+//
+
+static inline uint8 MCS6502ReadByte(uint16 addr, MCS6502ExecutionContext * context)
+{
+    return context->readByte(addr, context->readWriteContext);
+}
+
+static inline void MCS6502WriteByte(uint16 addr, uint8 byte, MCS6502ExecutionContext * context)
+{
+    context->writeByte(addr, byte, context->readWriteContext);
 }
 
 //
 // Internal helper functions
 //
 
-static inline void PushByte(uint8 byte, MCS6502CPU * cpu, MCS6502DataBus * dataBus)
+static inline void PushByte(uint8 byte, MCS6502ExecutionContext * context)
 {
-    uint16 esp = 0x0100 + cpu->sp;
-    DATABUS_WRITE_BYTE(esp, byte);
-    cpu->sp = cpu->sp - 1;
+    uint16 esp = 0x0100 + context->sp;
+    MCS6502WriteByte(esp, byte, context);
+    context->sp = context->sp - 1;
 }
 
-static inline void PushFlags(bool b, MCS6502CPU * cpu, MCS6502DataBus * dataBus)
+static inline void PushFlags(bool b, MCS6502ExecutionContext * context)
 {
-    uint8 p = cpu->p;
+    uint8 p = context->p;
     p |= 0x20; // bit 5 always set in pushed status
     if (b) {
         p |= MCS6502_STATUS_B;
     } else {
         p &= (~MCS6502_STATUS_B);
     }
-    PushByte(p, cpu, dataBus);
+    PushByte(p, context);
 }
 
-static inline uint8 PullByte(MCS6502CPU * cpu, MCS6502DataBus * dataBus)
+static inline uint8 PullByte(MCS6502ExecutionContext * context)
 {
-    cpu->sp = cpu->sp + 1;
-    uint16 esp = 0x0100 + cpu->sp;
-    return DATABUS_READ_BYTE(esp);
+    context->sp = context->sp + 1;
+    uint16 esp = 0x0100 + context->sp;
+    return MCS6502ReadByte(esp, context);
 }
 
-static inline uint16 ReadWordAtAddress(MCS6502DataBus * dataBus, uint16 addr)
+static inline uint16 ReadWordAtAddress(uint16 addr, MCS6502ExecutionContext * context)
 {
-    uint8 veclo = DATABUS_READ_BYTE(addr);
-    uint8 vechi = DATABUS_READ_BYTE(addr + 1);
+    uint8 veclo = MCS6502ReadByte(addr, context);
+    uint8 vechi = MCS6502ReadByte(addr + 1, context);
     return (vechi << 8) | veclo;
-}
-
-static uint16 EffectiveOperandAddressForInstruction(MCS6502CPU * cpu, MCS6502Instruction * instruction, MCS6502DataBus * dataBus)
-{
-    switch (instruction->mode) {
-        case MCS6502AddressingZeroPage:
-        {
-            return DATABUS_READ_BYTE(cpu->pc + 1);
-        }
-        case MCS6502AddressingZeroPageX:
-        {
-            return (uint16)(uint8)(DATABUS_READ_BYTE(cpu->pc + 1) + cpu->x);
-        }
-        case MCS6502AddressingZeroPageY:
-        {
-            return (uint16)(uint8)(DATABUS_READ_BYTE(cpu->pc + 1) + cpu->y);
-        }
-        case MCS6502AddressingAbsolute:
-        {
-            return ReadWordAtAddress(dataBus, cpu->pc + 1);
-        }
-        case MCS6502AddressingAbsoluteX:
-        {
-            uint16 addr = ReadWordAtAddress(dataBus, cpu->pc + 1);
-            return addr + cpu->x;
-        }
-        case MCS6502AddressingAbsoluteY:
-        {
-            uint16 addr = ReadWordAtAddress(dataBus, cpu->pc + 1);
-            return addr + cpu->y;
-        }
-        case MCS6502AddressingIndirect:
-        {
-            uint8 loIndirect = DATABUS_READ_BYTE(cpu->pc + 1);
-            uint8 hiIndirect = DATABUS_READ_BYTE(cpu->pc + 2);
-            uint16 indirect = (hiIndirect << 8 | loIndirect);
-            // This mode has no carry so force a wrap in the hi address if it crosses
-            // a page. User code should never do this because it's bad to, but we
-            // will behave like the hardware would just in case.
-            uint8 lo = DATABUS_READ_BYTE(indirect);
-            uint8 hi;
-            if (loIndirect == 0xFF) {
-                hi = DATABUS_READ_BYTE(hiIndirect << 8);
-            } else {
-                hi = DATABUS_READ_BYTE(indirect + 1);
-            }
-            return (hi << 8 | lo);
-        }
-        case MCS6502AddressingXIndirect:
-        {
-            uint8 addr = (uint8)(cpu->x + DATABUS_READ_BYTE(cpu->pc + 1));
-            return ReadWordAtAddress(dataBus, addr);
-        }
-        case MCS6502AddressingIndirectY:
-        {
-            uint8 addr = DATABUS_READ_BYTE(cpu->pc + 1);
-            return ReadWordAtAddress(dataBus, addr) + cpu->y;
-        }
-        case MCS6502AddressingRelative:
-        {
-            signed char offset = (signed char)DATABUS_READ_BYTE(cpu->pc + 1);
-            uint16 addr = cpu->pc + 2 + offset; // all relative instructions are 2 bytes long, and we need to account for that here.
-            return addr;
-        }
-        // This function has no meaning for the following modes and isn't called for them.
-        case MCS6502AddressingImmediate:
-        case MCS6502AddressingAccumulator:
-        case MCS6502AddressingImplied:
-        default:
-            ;
-    }
-    return 0;
-}
-
-static uint8 OperandValueForCurrentInstruction(MCS6502CPU * cpu, MCS6502Instruction * instruction, MCS6502DataBus * dataBus)
-{
-    if (instruction->mode == MCS6502AddressingImmediate) {
-        return DATABUS_READ_BYTE(cpu->pc + 1);
-    } else if (instruction->mode == MCS6502AddressingAccumulator) {
-        return cpu->a;
-    } else {
-        uint16 addr = EffectiveOperandAddressForInstruction(cpu, instruction, dataBus);
-        return DATABUS_READ_BYTE(addr);
-    }
-}
-
-static void WriteResultForCurrentInstruction(uint8 result, MCS6502CPU * cpu, MCS6502Instruction * instruction, MCS6502DataBus * dataBus)
-{
-   if (instruction->mode == MCS6502AddressingAccumulator) {
-        cpu->a = result;
-   } else {
-        uint16 addr = EffectiveOperandAddressForInstruction(cpu, instruction, dataBus);
-       DATABUS_WRITE_BYTE(addr, result);
-   }
-}
-
-static int LengthForInstruction(MCS6502Instruction * instruction)
-{
-    switch (instruction->mode) {
-        case MCS6502AddressingImplied:
-            return 1;
-        case MCS6502AddressingImmediate:
-            return 2;
-        case MCS6502AddressingAccumulator:
-            return 1;
-        case MCS6502AddressingZeroPage:
-            return 2;
-        case MCS6502AddressingZeroPageX:
-            return 2;
-        case MCS6502AddressingZeroPageY:
-            return 2;
-        case MCS6502AddressingAbsolute:
-            return 3;
-        case MCS6502AddressingAbsoluteX:
-            return 3;
-        case MCS6502AddressingAbsoluteY:
-            return 3;
-        case MCS6502AddressingIndirect:
-            return 3;
-        case MCS6502AddressingXIndirect:
-            return 2;
-        case MCS6502AddressingIndirectY:
-            return 2;
-        case MCS6502AddressingRelative:
-            return 2;
-    }
-}
-
-static inline void SetOrClearCarry(MCS6502CPU * cpu, bool c)
-{
-    if (c) {
-        cpu->p |= MCS6502_STATUS_C;
-    } else {
-        cpu->p &= (~MCS6502_STATUS_C);
-    }
-}
-
-static inline void UpdateZero(MCS6502CPU * cpu, uint8 val)
-{
-    if (val == 0) {
-        SetZero(cpu);
-    } else {
-        ClearZero(cpu);
-    }
-}
-
-static inline void UpdateNegative(MCS6502CPU * cpu, uint8 val)
-{
-    if ((val & 0x80) > 0) {
-        cpu->p |= MCS6502_STATUS_N;
-    } else {
-        cpu->p &= (~MCS6502_STATUS_N);
-    }
-}
-
-static inline void SetOrClearOverflow(MCS6502CPU * cpu, bool v)
-{
-    if (v) {
-        cpu->p |= MCS6502_STATUS_V;
-    } else {
-        cpu->p &= (~MCS6502_STATUS_V);
-    }
-}
-
-static inline void UpdateZeroNegative(MCS6502CPU * cpu, uint8 val)
-{
-    UpdateZero(cpu, val);
-    UpdateNegative(cpu, val);
-}
-
-static inline void ExecuteConditionalBranch(int condition, MCS6502CPU * cpu, MCS6502Instruction * instruction, MCS6502DataBus * dataBus)
-{
-    if (condition) {
-        cpu->pc = EffectiveOperandAddressForInstruction(cpu, instruction, dataBus);
-        cpu->timing = cpu->timing + 3;
-    } else {
-        cpu->pc = cpu->pc + LengthForInstruction(instruction);
-        cpu->timing = cpu->timing + 2;
-    }
 }
 
 static inline uint8 BCDFromInteger(int integer)
@@ -1265,41 +1170,195 @@ static inline int IntegerFromBCD(uint8 bcd)
     return val;
 }
 
-static void HandleIRQ(MCS6502CPU * cpu, MCS6502DataBus * dataBus)
+static void HandleIRQ(MCS6502ExecutionContext * context)
 {
-    cpu->irqPending = false;
-    uint16 returnPC = cpu->pc;
-    PushByte((returnPC >> 8) & 0xFF, cpu, dataBus);
-    PushByte(returnPC & 0xFF, cpu, dataBus);
-    PushFlags(false, cpu, dataBus);
-    SetInterruptDisable(cpu);
-    cpu->pc = ReadWordAtAddress(dataBus, MCS6502_IRQ_BRK);
-    cpu->timing += 7;
+    context->irqPending = false;
+    uint16 returnPC = context->pc;
+    PushByte((returnPC >> 8) & 0xFF, context);
+    PushByte(returnPC & 0xFF, context);
+    PushFlags(false, context);
+    SetInterruptDisable(context);
+    context->pc = ReadWordAtAddress(MCS6502_IRQ_BRK, context);
+    context->timingForLastOperation = 7;
 }
 
-static void HandleNMI(MCS6502CPU * cpu, MCS6502DataBus * dataBus)
+static void HandleNMI(MCS6502ExecutionContext * context)
 {
-    cpu->nmiPending = false;
-    uint16 returnPC = cpu->pc;
-    PushByte((returnPC >> 8) & 0xFF, cpu, dataBus);
-    PushByte(returnPC & 0xFF, cpu, dataBus);
-    PushFlags(false, cpu, dataBus);
-    SetInterruptDisable(cpu);
-    cpu->pc = ReadWordAtAddress(dataBus, MCS6502_IRQ_BRK);
-    cpu->timing += 7;
+    context->nmiPending = false;
+    uint16 returnPC = context->pc;
+    PushByte((returnPC >> 8) & 0xFF, context);
+    PushByte(returnPC & 0xFF, context);
+    PushFlags(false, context);
+    SetInterruptDisable(context);
+    context->pc = ReadWordAtAddress(MCS6502_NMI, context);
+    context->timingForLastOperation = 7;
+}
+
+static uint16 EffectiveOperandAddressForInstruction(MCS6502Instruction * instruction, MCS6502ExecutionContext * context, bool * crossesPageBoundary)
+{
+    #define ADDRESSES_ON_DIFFERENT_PAGES(addr1, addr2) (((addr1) & 0xFF00) != ((addr2) & 0xFF00))
+    switch (instruction->mode) {
+        case MCS6502AddressingZeroPage:
+        {
+            return MCS6502ReadByte(context->pc + 1, context);
+        }
+        case MCS6502AddressingZeroPageX:
+        {
+            return (uint16)(uint8)(MCS6502ReadByte(context->pc + 1, context) + context->x);
+        }
+        case MCS6502AddressingZeroPageY:
+        {
+            return (uint16)(uint8)(MCS6502ReadByte(context->pc + 1, context) + context->y);
+        }
+        case MCS6502AddressingAbsolute:
+        {
+            return ReadWordAtAddress(context->pc + 1, context);
+        }
+        case MCS6502AddressingAbsoluteX:
+        {
+            uint16 baseAddr = ReadWordAtAddress(context->pc + 1, context);
+            uint16 finalAddr = baseAddr + context->x;
+            if (crossesPageBoundary != NULL) {
+                *crossesPageBoundary = ADDRESSES_ON_DIFFERENT_PAGES(baseAddr, finalAddr);
+            }
+            return finalAddr;
+        }
+        case MCS6502AddressingAbsoluteY:
+        {
+            uint16 baseAddr = ReadWordAtAddress(context->pc + 1, context);
+            uint16 finalAddr = baseAddr + context->y;
+            if (crossesPageBoundary != NULL) {
+                *crossesPageBoundary = ADDRESSES_ON_DIFFERENT_PAGES(baseAddr, finalAddr);
+            }
+            return finalAddr;
+        }
+        case MCS6502AddressingIndirect:
+        {
+            uint8 loIndirect = MCS6502ReadByte(context->pc + 1, context);
+            uint8 hiIndirect = MCS6502ReadByte(context->pc + 2, context);
+            uint16 indirect = (hiIndirect << 8 | loIndirect);
+            // This mode has no carry so force a wrap in the hi address if it crosses
+            // a page. User code should never do this because it's bad to, but we
+            // will behave like the hardware would just in case.
+            uint8 lo = MCS6502ReadByte(indirect, context);
+            uint8 hi;
+            if (loIndirect == 0xFF) {
+                hi = MCS6502ReadByte(hiIndirect << 8, context);
+            } else {
+                hi = MCS6502ReadByte(indirect + 1, context);
+            }
+            return (hi << 8 | lo);
+        }
+        case MCS6502AddressingXIndirect:
+        {
+            uint8 addr = (uint8)(context->x + MCS6502ReadByte(context->pc + 1, context));
+            return ReadWordAtAddress(addr, context);
+        }
+        case MCS6502AddressingIndirectY:
+        {
+            uint8 baseAddr = MCS6502ReadByte(context->pc + 1, context);
+            uint16 finalAddr = ReadWordAtAddress(baseAddr, context) + context->y;
+            if (crossesPageBoundary != NULL) {
+                *crossesPageBoundary = ADDRESSES_ON_DIFFERENT_PAGES(baseAddr, finalAddr);
+            }
+            return finalAddr;
+        }
+        case MCS6502AddressingRelative:
+        {
+            signed char offset = (signed char)MCS6502ReadByte(context->pc + 1, context);
+            uint16 addr = context->pc + 2 + offset; // all relative instructions are 2 bytes long, and we need to account for that here.
+            if (crossesPageBoundary != NULL) {
+                *crossesPageBoundary = ADDRESSES_ON_DIFFERENT_PAGES(addr, context->pc);
+            }
+            return addr;
+        }
+        // This function has no meaning for the following modes and isn't called for them.
+        case MCS6502AddressingImmediate:
+        case MCS6502AddressingAccumulator:
+        case MCS6502AddressingImplied:
+        default:
+            ;
+    }
+    return 0;
+    #undef ADDRESSES_ON_DIFFERENT_PAGES
+}
+
+static uint8 ReadOperandValueForCurrentInstruction(MCS6502Instruction * instruction, MCS6502ExecutionContext * context)
+{
+    if (instruction->mode == MCS6502AddressingImmediate) {
+        return MCS6502ReadByte(context->pc + 1, context);
+    } else if (instruction->mode == MCS6502AddressingAccumulator) {
+        return context->a;
+    } else {
+        bool crossesPageBoundary = false;
+        uint16 addr = EffectiveOperandAddressForInstruction(instruction, context, &crossesPageBoundary);
+        if (crossesPageBoundary && instruction->timingAddOne) {
+            context->timingForLastOperation += 1;
+        }
+        return MCS6502ReadByte(addr, context);
+    }
+}
+
+static void WriteResultForCurrentInstruction(uint8 result, MCS6502Instruction * instruction, MCS6502ExecutionContext * context)
+{
+   if (instruction->mode == MCS6502AddressingAccumulator) {
+        context->a = result;
+   } else {
+        uint16 addr = EffectiveOperandAddressForInstruction(instruction, context, NULL);
+       MCS6502WriteByte(addr, result, context);
+   }
+}
+
+static int LengthForInstruction(MCS6502Instruction * instruction)
+{
+    switch (instruction->mode) {
+        case MCS6502AddressingImplied:
+        case MCS6502AddressingAccumulator:
+            return 1;
+            
+        case MCS6502AddressingImmediate:
+        case MCS6502AddressingZeroPage:
+        case MCS6502AddressingZeroPageX:
+        case MCS6502AddressingZeroPageY:
+        case MCS6502AddressingXIndirect:
+        case MCS6502AddressingIndirectY:
+        case MCS6502AddressingRelative:
+            return 2;
+
+        case MCS6502AddressingAbsolute:
+        case MCS6502AddressingAbsoluteX:
+        case MCS6502AddressingAbsoluteY:
+        case MCS6502AddressingIndirect:
+            return 3;
+    }
+}
+
+static void ExecuteConditionalBranch(bool condition, MCS6502Instruction * instruction, MCS6502ExecutionContext * context)
+{
+    if (condition) {
+        bool crossesPageBoundary = false;
+        context->pc = EffectiveOperandAddressForInstruction(instruction, context, &crossesPageBoundary);
+        context->timingForLastOperation += 3;
+        if (instruction->timingAddOne && crossesPageBoundary) {
+            context->timingForLastOperation += 1;
+        }
+    } else {
+        context->pc = context->pc + LengthForInstruction(instruction);
+        context->timingForLastOperation += 2;
+    }
 }
 
 //
 // DEBUG
 //
 
-char * DisassembleCurrentInstruction(MCS6502Instruction * instruction, MCS6502CPU * cpu, MCS6502DataBus * dataBus)
+char * DisassembleCurrentInstruction(MCS6502Instruction * instruction, MCS6502ExecutionContext * context)
 {
     static char scratch[256];
     switch (instruction->mode) {
         case MCS6502AddressingImmediate:
         {
-            uint8 val = DATABUS_READ_BYTE(cpu->pc + 1);
+            uint8 val = MCS6502ReadByte(context->pc + 1, context);
             sprintf(scratch, "#$%02X", val);
             break;
         }
@@ -1310,66 +1369,66 @@ char * DisassembleCurrentInstruction(MCS6502Instruction * instruction, MCS6502CP
         }
         case MCS6502AddressingIndirect:
         {
-            uint8 lo = DATABUS_READ_BYTE(cpu->pc + 1);
-            uint8 hi = DATABUS_READ_BYTE(cpu->pc + 2);
+            uint8 lo = MCS6502ReadByte(context->pc + 1, context);
+            uint8 hi = MCS6502ReadByte(context->pc + 2, context);
             sprintf(scratch, "($%02X%02X)", hi, lo);
             break;
         }
         case MCS6502AddressingAbsolute:
         {
-            uint8 lo = DATABUS_READ_BYTE(cpu->pc + 1);
-            uint8 hi = DATABUS_READ_BYTE(cpu->pc + 2);
+            uint8 lo = MCS6502ReadByte(context->pc + 1, context);
+            uint8 hi = MCS6502ReadByte(context->pc + 2, context);
             sprintf(scratch, "$%02X%02X", hi, lo);
             break;
         }
         case MCS6502AddressingZeroPage:
         {
-            uint8 addr = DATABUS_READ_BYTE(cpu->pc + 1);
+            uint8 addr = MCS6502ReadByte(context->pc + 1, context);
             sprintf(scratch, "$%02X", addr);
             break;
         }
         case MCS6502AddressingAbsoluteX:
         {
-            uint8 lo = DATABUS_READ_BYTE(cpu->pc + 1);
-            uint8 hi = DATABUS_READ_BYTE(cpu->pc + 2);
+            uint8 lo = MCS6502ReadByte(context->pc + 1, context);
+            uint8 hi = MCS6502ReadByte(context->pc + 2, context);
             sprintf(scratch, "$%02X%02X, X", hi, lo);
             break;
         }
         case MCS6502AddressingAbsoluteY:
         {
-            uint8 lo = DATABUS_READ_BYTE(cpu->pc + 1);
-            uint8 hi = DATABUS_READ_BYTE(cpu->pc + 2);
+            uint8 lo = MCS6502ReadByte(context->pc + 1, context);
+            uint8 hi = MCS6502ReadByte(context->pc + 2, context);
             sprintf(scratch, "$%02X%02X, Y", hi, lo);
             break;
         }
         case MCS6502AddressingZeroPageX:
         {
-            uint8 addr = DATABUS_READ_BYTE(cpu->pc + 1);
+            uint8 addr = MCS6502ReadByte(context->pc + 1, context);
             sprintf(scratch, "$%02X, X", addr);
             break;
         }
         case MCS6502AddressingZeroPageY:
         {
-            uint8 addr = DATABUS_READ_BYTE(cpu->pc + 1);
+            uint8 addr = MCS6502ReadByte(context->pc + 1, context);
             sprintf(scratch, "$%02X, Y", addr);
             break;
         }
         case MCS6502AddressingXIndirect:
         {
-            uint8 addr = DATABUS_READ_BYTE(cpu->pc + 1);
+            uint8 addr = MCS6502ReadByte(context->pc + 1, context);
             sprintf(scratch, "($%02X, X)", addr);
             break;
         }
         case MCS6502AddressingIndirectY:
         {
-            uint8 addr = DATABUS_READ_BYTE(cpu->pc + 1);
+            uint8 addr = MCS6502ReadByte(context->pc + 1, context);
             sprintf(scratch, "($%02X), Y", addr);
             break;
         }
         case MCS6502AddressingRelative:
         {
-            signed char offset = (signed char)DATABUS_READ_BYTE(cpu->pc + 1);
-            uint16 addr = cpu->pc + 2 + offset;
+            signed char offset = (signed char)MCS6502ReadByte(context->pc + 1, context);
+            uint16 addr = context->pc + 2 + offset;
             sprintf(scratch, "$%04X", addr); // this is a special case, it's not really the disassembly
             break;
         }
