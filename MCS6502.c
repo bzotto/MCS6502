@@ -482,11 +482,11 @@ MCS6502ExecNext(
         case 0x0E:
         case 0x1E:
         {
-            uint8 operand = ReadOperandValueForCurrentInstruction(instruction, context);
-            SetOrClearCarry((operand & 0x80) != 0, context);
-            operand <<= 1;
-            UpdateZeroNegative(operand, context);
-            WriteResultForCurrentInstruction(operand, instruction, context);
+            uint8 val = ReadOperandValueForCurrentInstruction(instruction, context);
+            SetOrClearCarry((val & 0x80) != 0, context);
+            val <<= 1;
+            UpdateZeroNegative(val, context);
+            WriteResultForCurrentInstruction(val, instruction, context);
             break;
         }
             
@@ -654,10 +654,10 @@ MCS6502ExecNext(
         case 0xCE:
         case 0xDE:
         {
-            uint8 operand = ReadOperandValueForCurrentInstruction(instruction, context);
-            operand--;
-            WriteResultForCurrentInstruction(operand, instruction, context);
-            UpdateZeroNegative(operand, context);
+            uint8 val = ReadOperandValueForCurrentInstruction(instruction, context);
+            val--;
+            WriteResultForCurrentInstruction(val, instruction, context);
+            UpdateZeroNegative(val, context);
             break;
         }
             
@@ -699,10 +699,10 @@ MCS6502ExecNext(
         case 0xEE:
         case 0xFE:
         {
-            uint8 operand = ReadOperandValueForCurrentInstruction(instruction, context);
-            operand++;
-            WriteResultForCurrentInstruction(operand, instruction, context);
-            UpdateZeroNegative(operand, context);
+            uint8 value = ReadOperandValueForCurrentInstruction(instruction, context);
+            value++;
+            WriteResultForCurrentInstruction(value, instruction, context);
+            UpdateZeroNegative(value, context);
             break;
         }
             
@@ -794,13 +794,13 @@ MCS6502ExecNext(
         case 0x4E:
         case 0x5E:
         {
-            uint8 operand = ReadOperandValueForCurrentInstruction(instruction, context);
-            SetOrClearCarry((operand & 0x01) != 0, context);
-            operand >>= 1;
-            operand &= 0x7F;
-            UpdateZero(operand, context);
+            uint8 val = ReadOperandValueForCurrentInstruction(instruction, context);
+            SetOrClearCarry((val & 0x01) != 0, context);
+            val >>= 1;
+            val &= 0x7F;
+            UpdateZero(val, context);
             ClearNegative(context);
-            WriteResultForCurrentInstruction(operand, instruction, context);
+            WriteResultForCurrentInstruction(val, instruction, context);
             break;
         }
             
@@ -865,14 +865,14 @@ MCS6502ExecNext(
         case 0x2E:
         case 0x3E:
         {
-            uint8 operand = ReadOperandValueForCurrentInstruction(instruction, context);
+            uint8 val = ReadOperandValueForCurrentInstruction(instruction, context);
             bool initialCarry = IsCarrySet(context);
-            SetOrClearCarry((operand & 0x80) > 0, context);
-            operand <<= 1;
-            operand &= 0xFE;
-            operand |= (initialCarry ? 0x1 : 0x0);
-            WriteResultForCurrentInstruction(operand, instruction, context);
-            UpdateZeroNegative(operand, context);
+            SetOrClearCarry((val & 0x80) > 0, context);
+            val <<= 1;
+            val &= 0xFE;
+            val |= (initialCarry ? 0x1 : 0x0);
+            WriteResultForCurrentInstruction(val, instruction, context);
+            UpdateZeroNegative(val, context);
             break;
         }
             
@@ -883,14 +883,14 @@ MCS6502ExecNext(
         case 0x6E:
         case 0x7E:
         {
-            uint8 operand = ReadOperandValueForCurrentInstruction(instruction, context);
+            uint8 val = ReadOperandValueForCurrentInstruction(instruction, context);
             int initialCarry = IsCarrySet(context);
-            SetOrClearCarry((operand & 0x01) > 0, context);
-            operand >>= 1;
-            operand &= 0x7F;
-            operand |= (initialCarry ? 0x80 : 0);
-            WriteResultForCurrentInstruction(operand, instruction, context);
-            UpdateZeroNegative(operand, context);
+            SetOrClearCarry((val & 0x01) > 0, context);
+            val >>= 1;
+            val &= 0x7F;
+            val |= (initialCarry ? 0x80 : 0);
+            WriteResultForCurrentInstruction(val, instruction, context);
+            UpdateZeroNegative(val, context);
             break;
         }
             
