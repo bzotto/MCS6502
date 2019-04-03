@@ -31,11 +31,11 @@ When the 6502 starts up it will load an address vector from 0xFFFC/0xFFFD, set i
 
 In a real hardware configuration, a system typically ties those high addresses to a ROM chip where the reset vector is hard-coded and points to an address (also within ROM) where the system start up code is.
 
-You shoud know that the 6502 privileges the first ("zero page") of 256 bytes (0x00xx) as a special page for fast-access work area and the second page (0x01xx) is always the stack. The rest is up to you. The 6502 was super popular in real life and remains super popular in emulation, so there are great detailed resources all over the place for learning more.
+You should know that the 6502 privileges the first ("zero page") of 256 bytes (0x00xx) as a special page for fast-access work area and the second page (0x01xx) is always the stack. The rest is up to you. The 6502 was super popular in real life and remains super popular in emulation, so there are great detailed resources all over the place for learning more.
 
 ## What it does
 
-- Passes the full [functional test suite here](https://github.com/Klaus2m5/6502_65C02_functional_tests) So, it works.
+- Passes the full [functional test suite here](https://github.com/Klaus2m5/6502_65C02_functional_tests). So, it works.
 - Includes decimal mode in arithmetic, if you're a crazy person who uses that.
 - Includes working `ROR` and `ROL` instructions (the very original 6502s did not).
 - It's instruction cycle count accurate, if you want that.
@@ -43,7 +43,7 @@ You shoud know that the 6502 privileges the first ("zero page") of 256 bytes (0x
 
 ## What it doesn't do (sharp corners)
 
-- The emulated CPU is an (original) NMOS 6502, not a 65C02, and has the instruction set and undefined behaviors of that CPU. Undefined behaviors in then emulator will not in all cases reflect the real hardware's undefined behaviors. No "undocumented" opcodes are supported. 
+- The emulated CPU is an (original) NMOS 6502, not a 65C02, and has the instruction set and undefined behaviors of that CPU. Undefined behaviors in the emulator will not in all cases reflect the real hardware's undefined behaviors. No "undocumented" opcodes are supported. 
 
 - Although the instruction relative cycle counts are accurate (when using the tick function to execute), this is a *functional emulator*, not a *hardware simulator*. The emulator does not step through the hardware's logical cycle stages to do its reads and writes. All actual work for an instruction is performed on its first tick. Thus you cannot use it as a component of a more complex hardware-signal emulator.
 
