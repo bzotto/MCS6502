@@ -4,7 +4,7 @@ The MOS 6502 8-bit CPU was introduced in 1975 and the architecture was ubiquitou
 
 ## Why should I use your particular 6502 emulator? 
 
-If we are friends in real life, I guess I'd feel bad if you used someone else's! Aside from that, it's probably hassle-free if you can use C in your project, and on a modern machine it can easily outpace the hardware clock speeds of traditional 6502-based systems. But there's nothing magical about this emulator, and there are loads of others floating around for various platforms with various levels of complexity. I wrote this "clean room" from documentation (with the help of a test suite) as a personal study project for something larger, and it seemed handy enough that perhaps it may fit someeone else's needs. It's definitely easy to use if you can drop C into your project. 
+If we are friends in real life, I guess I'd feel bad if you used someone else's! Aside from that, it's probably hassle-free if you can drop C into your project, and on a modern machine it can easily work within the hardware clock speeds of traditional 6502-based systems. But there's nothing magical about this emulator, and there are loads of others floating around for various platforms with various levels of complexity. I wrote this "clean room" from documentation (with the help of a test suite) as a personal study project for something larger, and it seemed handy enough that perhaps it may fit someeone else's needs. 
 
 ## Getting started 
 
