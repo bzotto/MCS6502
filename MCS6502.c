@@ -277,7 +277,7 @@ MCS6502Init(
 )
 {
     // Blank out the context state.
-    memset(context, sizeof(MCS6502ExecutionContext), 0);
+    memset(context, 0, sizeof(MCS6502ExecutionContext));
     
     // Setup the data access functions.
     context->readByte = readByteFn;
@@ -288,7 +288,7 @@ MCS6502Init(
     // all unoccupied slots (invalid opcodes) will be NULL.
     static bool opcodesReady = false;
     if (!opcodesReady) {
-        memset(&MCS6502OpcodeTable[0], sizeof(MCS6502OpcodeTable), 0);
+        memset(&MCS6502OpcodeTable[0], 0, sizeof(MCS6502OpcodeTable));
         int instructionCount = sizeof(MCS6502Instructions)/sizeof(MCS6502Instructions[0]);
         for (int i = 0; i < instructionCount; i++) {
             MCS6502Instruction * instruction = &MCS6502Instructions[i];
@@ -1330,6 +1330,7 @@ static int LengthForInstruction(MCS6502Instruction * instruction)
         case MCS6502AddressingAbsoluteY:
         case MCS6502AddressingIndirect:
             return 3;
+        default: return 1;
     }
 }
 
@@ -1437,7 +1438,7 @@ char * DisassembleCurrentInstruction(MCS6502Instruction * instruction, MCS6502Ex
             scratch[0] = '\0';
             break;
     }
-    static char line[256];
+    static char line[260];
     sprintf(line, "%s %s", instruction->mnemonic, scratch);
     return line;
 }
